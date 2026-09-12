@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# vulkangears - what must never end up in the repository
+#
+# Everything ignored here is either fetched or generated.  A fresh clone should
+# build from the tracked sources alone:
+#     ./scripts/fetch_deps.sh                                   (Linux, no root)
+#     cmake -S . -B build && cmake --build build -j
+# ---------------------------------------------------------------------------
+
+# --- fetched dependencies --------------------------------------------------
+# scripts/fetch_deps.sh unpacks the missing -dev packages here (Vulkan headers,
+# GLFW, glslangValidator, validation layers).  Large binaries - never commit.
+/third_party/
+
+# --- build output ---------------------------------------------------------
+# The CMake build directory (cmake -S . -B build).  In-source builds are
+# refused by CMakeLists.txt; /generated/ is kept as a belt-and-braces guard in
+# case one is ever forced through.
+/build/
+/generated/
+
+# --- program output -------------------------------------------------------
+# --headless writes a PPM (vulkangears.ppm by default, in the current dir).
+*.ppm
+*.log
+
+# --- compiler and CMake leftovers -----------------------------------------
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.spv
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+install_manifest.txt
+compile_commands.json
+build.ninja
+rules.ninja
+.ninja_deps
+.ninja_log
+
+# --- editors, IDEs and OS cruft -------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
