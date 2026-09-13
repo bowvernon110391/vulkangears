@@ -14,10 +14,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
         "${CMAKE_SOURCE_DIR}.")
 endif()
 
+# C is enabled alongside CXX because GLFW - a C project that FetchContent adds
+# as a subproject - calls project(... LANGUAGES C).  A language the top-level
+# project() does not enable has to be discovered in the middle of the configure,
+# and that nested detection is fragile with the Visual Studio generator: it can
+# fail with "No CMAKE_C_COMPILER could be found" even though cl.exe is installed.
+# Enabling C here makes CMake detect both compilers in the normal top-level pass.
 project(vulkangears
     VERSION 1.0.0
     DESCRIPTION "Three meshing checker-textured gears, rendered with Vulkan"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # Language settings
@@ -118,7 +124,6 @@ if(NOT VKG_USE_SYSROOT)
 
     if(VKG_GLFW_TARGET)
         set(VKG_GLFW_DESCRIPTION "system GLFW (${VKG_GLFW_TARGET})")
-        target_link_libraries(vkg_deps INTERFACE ${VKG_GLFW_TARGET})
     elseif(VKG_FETCH_GLFW)
         include(FetchContent)
         set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -140,6 +145,13 @@ if(NOT VKG_USE_SYSROOT)
             "GLFW was not found and VKG_FETCH_GLFW is OFF.\n"
             "Install it (vcpkg install glfw3, or -Dglfw3_DIR=<dir>), set "
             "VKG_FETCH_GLFW=ON, or use the vendored sysroot on Linux.")
+    endif()
+
+    # Link whichever GLFW was resolved into the dependency interface.  This has
+    # to happen after the branch above, not inside it, so that a fetched GLFW
+    # contributes its include directory and library exactly like a system one.
+    if(VKG_GLFW_TARGET)
+        target_link_libraries(vkg_deps INTERFACE ${VKG_GLFW_TARGET})
     endif()
 endif()
 
