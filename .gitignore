@@ -24,6 +24,15 @@
 *.ppm
 *.log
 
+# --- the MCP screenshot server --------------------------------------------
+# .mcp/screenshot/ is tracked on purpose: it is small, and tracking it is what
+# lets .vscode/mcp.json refer to it without a single absolute path. Only the
+# private virtualenv and the bytecode caches are ignored -- setup.ps1 rebuilds
+# the venv after a clone.
+.mcp/screenshot/.venv/
+__pycache__/
+*.pyc
+
 # --- compiler and CMake leftovers -----------------------------------------
 *.o
 *.obj
@@ -52,7 +61,12 @@ rules.ninja
 
 # --- editors, IDEs and OS cruft -------------------------------------------
 .vs/
-.vscode/
+# Everything under .vscode/ is personal EXCEPT the MCP server registration,
+# which is how a fresh clone gets the screenshot tools. Note this ignores the
+# directory's *contents* rather than the directory: git does not descend into an
+# excluded directory, so a negation for a file inside one never matches.
+.vscode/*
+!.vscode/mcp.json
 .idea/
 *.swp
 *.swo

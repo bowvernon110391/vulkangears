@@ -1,0 +1,7 @@
+# Runtime dependency for the screenshot MCP server.
+#
+# `mcp` 2.x is the current stable line.  We use the high-level MCPServer API and
+# its `Image` helper, which turns a file or raw bytes into an MCP ImageContent
+# block -- that is what puts the screenshot in front of the model instead of on
+# disk.
+mcp>=2
