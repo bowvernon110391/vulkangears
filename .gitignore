@@ -30,6 +30,9 @@
 # private virtualenv and the bytecode caches are ignored -- setup.ps1 rebuilds
 # the venv after a clone.
 .mcp/screenshot/.venv/
+# setup.sh keeps the 2 MB get-pip.py it downloads here so that a rebuild does not
+# need the network a second time. Fetched, not source.
+.mcp/screenshot/.pip-bootstrap/
 __pycache__/
 *.pyc
 
@@ -61,12 +64,17 @@ rules.ninja
 
 # --- editors, IDEs and OS cruft -------------------------------------------
 .vs/
-# Everything under .vscode/ is personal EXCEPT the MCP server registration,
-# which is how a fresh clone gets the screenshot tools. Note this ignores the
-# directory's *contents* rather than the directory: git does not descend into an
-# excluded directory, so a negation for a file inside one never matches.
+# Everything under .vscode/ is personal, including mcp.json. That file used to be
+# tracked so a fresh clone got the screenshot tools, but it cannot hold a working
+# value on both Windows and Linux: a venv keeps its interpreter in bin/ on one and
+# Scripts/ on the other, and the MCP schema has no per-platform conditional (unlike
+# launch.json). Each setup script writes it instead, from the interpreter it just
+# built -- see .mcp/screenshot/write_mcp_config.py -- and it stays out of the
+# repository so one platform's answer is never committed over the other's.
+# Note this ignores the directory's *contents* rather than the directory: git does
+# not descend into an excluded directory, so a negation for a file inside one never
+# matches.
 .vscode/*
-!.vscode/mcp.json
 .idea/
 *.swp
 *.swo

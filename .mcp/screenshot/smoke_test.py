@@ -5,6 +5,10 @@ Launches the server the same way a host does -- a subprocess, over stdio -- and
 exercises every tool, so this covers the protocol path and not merely the
 capture functions.  Run it with the venv interpreter:
 
+    .mcp/screenshot/.venv/bin/python .mcp/screenshot/smoke_test.py
+
+Windows uses the same command with the other interpreter path:
+
     .mcp/screenshot/.venv/Scripts/python.exe .mcp/screenshot/smoke_test.py
 
 Exits non-zero if anything fails.  Needs a desktop session, since the capture
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
 import struct
 import sys
@@ -27,6 +32,12 @@ from mcp.client.stdio import StdioServerParameters
 HERE = Path(__file__).resolve().parent
 SERVER = HERE / "server.py"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# The expected wording of the two capture routes is the server's own, not a copy
+# of it, so the checks here follow the platform instead of pinning one of them:
+# importing the module only runs its setup, never main().
+sys.path.insert(0, str(HERE))
+import server  # noqa: E402  (the path has to be set up first)
 
 # hwnd  pid  size       process / title
 WINDOW_ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)x(\d+)\s+(\S+)", re.MULTILINE)
@@ -74,7 +85,14 @@ async def run() -> int:
     print(f"python : {sys.executable}")
     print()
 
-    params = StdioServerParameters(command=sys.executable, args=[str(SERVER)])
+    # The child is given the whole environment on purpose.  The SDK's own idea of
+    # a clean environment carries only HOME, LOGNAME, PATH, SHELL, TERM and USER,
+    # which is enough on Windows but leaves out DISPLAY and XAUTHORITY -- and on
+    # Linux those are the entire configuration of the connection to the screen,
+    # so the server would come up believing there is no X server at all.
+    params = StdioServerParameters(
+        command=sys.executable, args=[str(SERVER)], env=dict(os.environ)
+    )
 
     # A successful handshake is itself the check that the server keeps stdout
     # clean: anything printed there would corrupt the JSON-RPC framing and the
@@ -117,7 +135,7 @@ async def run() -> int:
             check("capture_window explains what it captured",
                   "Captured" in note and process in note, f"got {note[:120]!r}")
             check("capture_window names the route it used",
-                  "rendered by the window" in note or "read from the screen" in note,
+                  server.RENDER_ROUTE in note or server.SCREEN_ROUTE in note,
                   f"got {note[:120]!r}")
             print(f"        -> {note.strip().splitlines()[0][:110]}")
 

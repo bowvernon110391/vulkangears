@@ -5,7 +5,8 @@ rem
 rem Why this exists: it builds the virtualenv on first use, so a fresh clone
 rem needs no setup step at all. Pointing an MCP `command` straight at
 rem .venv\Scripts\python.exe works too, but fails with an unhelpful error if the
-rem venv has not been built; this recovers instead.
+rem venv has not been built; this recovers instead. The building itself is
+rem delegated to setup.ps1, which also writes the VS Code registration.
 rem
 rem Also handy by hand, from the repository root:
 rem     .mcp\screenshot\run.cmd --selftest
@@ -36,23 +37,8 @@ exit /b %ERRORLEVEL%
 :bootstrap
     echo [screenshot] building the virtualenv -- this happens once per clone 1>&2
 
-    rem Prefer the `py` launcher: `python` on PATH can be a Microsoft Store stub
-    rem or a 2.x from a compiler toolchain.
-    set "LAUNCHER=python"
-    where py >nul 2>nul && set "LAUNCHER=py -3"
-
-    %LAUNCHER% -m venv "%VENV%" 1>&2
-    if not exist "%PY%" (
-        echo [screenshot] venv creation failed; falling back is not possible 1>&2
-        exit /b 1
-    )
-
-    "%PY%" -m pip install --quiet --upgrade pip 1>&2
-    "%PY%" -m pip install --quiet --requirement "%HERE%requirements.txt" 1>&2
-    if errorlevel 1 (
-        echo [screenshot] pip install failed 1>&2
-        exit /b 1
-    )
-
-    echo [screenshot] ready 1>&2
+    rem The work is setup.ps1's, not a second copy of it. Keeping one copy is
+    rem what makes the venv rules -- which platform the venv belongs to, and
+    rem which interpreter mcp.json should name -- apply to this path too.
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%setup.ps1" 1>&2
     exit /b 0
