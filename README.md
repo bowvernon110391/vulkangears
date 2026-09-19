@@ -14,8 +14,9 @@ including the seed, so any train can be reproduced.
 
 ![vulkangears running](docs/screenshot.png)
 
-*(actual window capture, running on the software rasteriser in this container -
-on a machine with a GPU the device line will name that GPU instead)*
+*(actual window capture, taken from the app's own window by the screenshot MCP
+server - the console's device line names whichever GPU or software rasteriser
+was in use)*
 
 ---
 
