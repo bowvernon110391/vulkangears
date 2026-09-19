@@ -3,11 +3,14 @@
 A small [glxgears](https://en.wikipedia.org/wiki/Glxgears)-style demo written directly against
 the **Vulkan** API in **C++11** (no C++14/17, no framework, no GLM).
 
-It opens a resizable 800x600 window and draws three checker-textured gears of
-different sizes that really mesh: a 30-tooth driver, a 14-tooth idler and a
-22-tooth output gear, spinning at speeds coupled by their tooth counts.
-The console prints a full Vulkan report (API version, device, driver, memory
-heaps, the app's own allocations) and a live FPS / frame-time / memory counter.
+It opens a resizable 800x600 window and draws a **train of 3 to 15 checker-textured
+gears** that really mesh: a random count is drawn at startup, most stages are
+idlers (the same tooth count, so the ratio is 1:1 and the only thing they change is
+the direction of rotation) and a few mesh into a smaller or larger gear to step
+the speed up or down. Every gear turns at a speed set by the tooth counts. The
+console prints a full Vulkan report (API version, device, driver, memory heaps,
+the app's own allocations) and a live FPS / frame-time / memory counter,
+including the seed, so any train can be reproduced.
 
 ![vulkangears running](docs/screenshot.png)
 
@@ -98,6 +101,11 @@ rendering
   --no-validation      do not enable the Khronos validation layer
   --verbose            also print informational messages from Vulkan layers
 
+the gear train
+  --gears N            number of gears, 3 to 15 (default: random)
+  --seed N             random seed (default: the clock; the seed used is
+                       printed, so any run can be reproduced with --seed)
+
 device selection
   --gpu N              use physical device N (see --list-devices)
   --gpu-name TEXT      pick the first device whose name contains TEXT
@@ -117,6 +125,8 @@ Useful invocations:
 ```sh
 ./vulkangears --frames 600 --fps-interval 500      # short benchmark, still prints diagnostics
 ./vulkangears --samples 1                          # MSAA off (much faster on a software rasteriser)
+./vulkangears --gears 5                            # exactly five gears
+./vulkangears --seed 1234                          # reproduce a particular train
 ./vulkangears --headless --out gears.ppm           # offscreen render, no display needed
 ./vulkangears --list-devices                       # what Vulkan devices exist
 ```
@@ -127,19 +137,19 @@ Press `ESC` or close the window to quit; on exit a session summary is printed.
 
 ```
 ================================================================
- vulkangears - three meshing, checker-textured spinning gears
+ vulkangears - a train of meshing, checker-textured spinning gears
 ================================================================
- Vulkan loader       : 1.3.275   (instance API 1.1.0, 1 device(s) present)
+ Vulkan loader       : 1.3.275   (instance API 1.1.0, 2 device(s) present)
  Instance layers     : VK_LAYER_KHRONOS_validation
- Instance extensions : VK_EXT_debug_utils VK_KHR_surface VK_KHR_xcb_surface
- Device [0]          : llvmpipe (LLVM 20.1.2, 256 bits)
+ Instance extensions : VK_EXT_debug_utils
+ Device [0]          : AMD Radeon R5 Graphics (RADV STONEY)
    API version       : 1.4.318
-   driver            : llvmpipe (Mesa 25.2.8-0ubuntu0.24.04.2 (LLVM 20.1.2)) conformance 1.3.1
-   vendor / device   : Mesa (0x10005) / 0x0000
-   type              : CPU / software
+   driver            : radv (Mesa 25.2.8-0ubuntu0.24.04.2) conformance 1.4.0
+   vendor / device   : AMD (0x1002) / 0x98e4
+   type              : integrated GPU
    driver version    : 25.2.8 (raw 0x06402008)
    queue families    : graphics 0 (shared), present 0 (shared)
- Device extensions   : VK_KHR_swapchain VK_EXT_memory_budget VK_KHR_driver_properties
+ Device extensions   : VK_EXT_memory_budget VK_KHR_driver_properties
  Target              : window 800x600
  Colour format       : B8G8R8A8_SRGB (SRGB_NONLINEAR)
  Present mode        : MAILBOX (no vsync, no tearing), 4 swapchain images, transform 1
@@ -147,28 +157,51 @@ Press `ESC` or close the window to quit; on exit a session summary is printed.
  Multisampling       : 4x (MSAA, resolved before present)
  Backface culling    : on
  Checker texture     : 256x256, 8x8 cells, 9 mip levels, anisotropic + trilinear filtering
- Gear train          : 30T (15.00 r) -> 14T (7.00 r) -> 22T (11.00 r), module 1.00
- Mesh timing error   : joint A-B +0.0000 %, joint B-C -0.0000 % of a tooth pitch
- Geometry            : 3432 triangles, 5550 vertices, 3 draw calls per frame
+ Gear train          : 30-30-30-30-30-21-21-31-31-46, module 1.00 (count chosen at random)
+ Train seed          : 1234  (--seed 1234 reproduces this train)
+ Train shape         : 6 idler stage(s), 1 step-up, 2 step-down
+ Stage ratios        : 1.00(idler) 1.00(idler) 1.00(idler) 1.00(idler) 1.43 1.00(idler) 0.68 1.00(idler) 0.67
+ Overall ratio       : 0.652 x  (last gear vs first, sign dropped)
+ Speed range         : 0.750 .. 1.643 rad/s
+ Mesh timing error   : 0.0000 % of a tooth pitch (worst of 9 joint(s))
+ Geometry            : 15416 triangles, 24668 vertices, 10 draw calls per frame
  Memory heaps:
-    heap 0  7.15 GiB   device-local   used 4.31 GiB / budget 7.15 GiB
-      type 0  device-local host-visible coherent cached
+    heap 0  1.36 GiB   host           used 3.21 MiB / budget 1.12 GiB
+      type 2  host-visible coherent
+      type 5  host-visible coherent cached
+      type 6  host-visible coherent cached
+    heap 1  2.72 GiB   device-local   used 18.16 MiB / budget 2.25 GiB
+      type 0  device-local
+      type 1  device-local
+      type 3  device-local host-visible coherent
+      type 4  device-local host-visible coherent cached
 
  Application allocations:
     depth buffer                  7.32 MiB
     MSAA colour target            7.32 MiB
-    gear vertex buffers     x3    173.44 KiB
-    gear index buffers      x3    20.11 KiB
+    gear vertex buffers    x10     1.13 MiB
+    gear index buffers     x10    49.34 KiB
     checker texture               342.25 KiB
     texture staging buffer        341.33 KiB
     scene uniform buffers         224 B
-    total                         15.51 MiB
+    total                         16.56 MiB
  Uniform buffer      : 224 B (2 frames in flight, 112 B per frame)
 ================================================================
 
 [info]  window is open - press ESC or close it to quit
-[fps]     7.3 fps | 137.07 ms avg (min 117.09, max 177.94) | 32 frames | app 15.51 MiB in 11 allocations | heap0 4.35 GiB/7.15 GiB | 5.4 s
+[fps]   152.0 fps |   6.58 ms avg (min 5.11, max 9.42) | 610 frames | app 16.56 MiB in 25 allocations | heap1 18.16 MiB/2.25 GiB | 4.0 s
 ```
+
+Those lines are what a 10-gear train actually reported; the run above is this
+machine's integrated GPU rather than the software rasteriser the screenshot was
+taken on, so the device lines differ while the structure does not.
+
+The train lines are the ones worth reading. `Gear train` is the tooth counts in
+driving order, so `30-30-30-30-30-21-21-31-31-46` is five 30-tooth gears, then a
+21, a 31, a 31 and a 46. `Train shape` and `Stage ratios` say which of the nine
+joints are idlers (`1.00`, the same tooth count) and which are steps, and
+`Overall ratio` is the output speed relative to the input. `Train seed` quotes the
+seed, so the exact arrangement in a screenshot can be reproduced.
 
 The `[fps]` line is printed once per `--fps-interval` and carries the interval's
 frames, average/min/max frame time, cumulative frame count, the application's own
@@ -189,7 +222,7 @@ scripts/fetch_deps.sh     vendors the missing -dev packages without root (Linux)
 shaders/gear.vert|frag    push constants, checker sampling, Blinn-Phong + rim light
 src/main.cpp              argument parsing, GLFW window, main loop, signals
 src/vk_gears.{h,cpp}      instance/device/swapchain/render pass/pipeline/frames
-src/gear.{h,cpp}          gear profile + train kinematics + checker texture
+src/gear.{h,cpp}          gear profile, train kinematics, the train generator, checker texture
 src/diag.{h,cpp}          logging, FPS counter, memory ledger, PPM output
 src/platform.{h,cpp}      the only POSIX/Win32 specific code
 src/math3d.h              minimal vec3/mat4 (column major, Vulkan clip space)
@@ -198,12 +231,16 @@ tests/mesh_check.cpp      geometry checks, run by `ctest`
 
 Rendering basics: one graphics queue, two frames in flight, 4x MSAA resolved
 straight into the swapchain image, a depth buffer, dynamic viewport/scissor,
-one pipeline shared by all three gears (per-gear data travels in a 96-byte push
+one pipeline shared by every gear (per-gear data travels in a 96-byte push
 constant: model matrix, tint, checker phase) and one procedurally generated
 mipmapped checker texture. The SPIR-V is compiled at build time and embedded in
 the executable, so the binary has no data files to find at runtime.
 
 ## The gears
+
+The train is generated at startup from a seed: how many gears (3 to 15), how many
+teeth each has, how they are arranged, and their colours and thicknesses. The seed
+is printed, so any train can be reproduced with `--seed`.
 
 * **Involute teeth.** A gear tooth is a 20 degree pressure-angle involute. This
   matters: with the naive straight-sided tooth the tips collide with the mating
@@ -218,11 +255,27 @@ the executable, so the binary has no data files to find at runtime.
 
   which makes teeth pass the line of centres at the same instants. The start
   phases are solved from that relation (see `solveJointPhase`), so the gears are
-  correctly timed rather than merely spinning near each other.
-* **A chain, not a loop.** A and B mesh, B and C mesh, and A and C do not touch.
-  That is deliberate: three external gears in a closed loop are locked and could
-  not turn at all - an odd property of gear trains that a demo could easily get
-  wrong.
+  correctly timed rather than merely spinning near each other. The same relation
+  fixes the speeds: `teeth * omega` is constant across a mesh.
+* **Mostly idlers, with a few steps.** A mesh between two gears of *equal* tooth
+  count is an idler: the ratio is exactly 1:1 and all it does is reverse the
+  direction of rotation. That is what lets a train of a dozen gears turn at a
+  watchable speed — the alternative, every stage multiplying the ratio, reaches
+  tens of thousands to one and the far end is either frozen or strobing. So the
+  generator draws mostly idlers and occasionally meshes into a smaller gear
+  (speeding the next one up) or a larger one (slowing it down), steering back
+  toward 1:1 whenever the running ratio nears 3:1 either way. A train of nothing
+  but idlers is legal but shows nothing, so at least one step is guaranteed.
+* **A chain, not a loop.** Each gear meshes with the next, and gears that are not
+  neighbours never touch. That is deliberate: a closed loop of external gears is
+  locked and could not turn at all — an odd property of gear trains that a demo
+  could easily get wrong. It is also what the layout works to preserve: each new
+  gear is placed by searching candidate directions and taking the one that keeps
+  it clear of every gear it does not mesh with, preferring the most compact
+  position. Maximising clearance instead would be the obvious rule and the wrong
+  one, since the direction pointing away from the whole train always clears
+  everything — the train would stretch into a straight line and the auto-framing
+  would shrink the gears to fit it.
 
 ## Verification
 
@@ -230,8 +283,8 @@ the executable, so the binary has no data files to find at runtime.
 ctest --test-dir build --output-on-failure
 ```
 
-builds and runs a small geometry test (no GPU needed) that proves, over a full
-meshing cycle:
+builds and runs a small geometry test (no GPU needed). For the fixed 30/14/22
+triple it proves, over a full meshing cycle:
 
 * the extruded profile is a closed, simple, star-shaped polygon whose rim
   normals point outward, and every triangle's winding agrees with its normals,
@@ -241,6 +294,26 @@ meshing cycle:
   while staying engaged with ~6 % of a module of backlash,
 * the outer gears really are clear of each other,
 * the checker texture and its mip chain are well formed.
+
+For the generated trains there are no expected numbers to compare against — that
+is the point of them varying — so they are checked by property instead, over 65
+trains: every gear count from 3 to 15 against five seeds. Whatever comes out of
+the generator has to be a train that meshes:
+
+* one module throughout, every tooth count inside 8..48,
+* each joint's centres exactly a pitch-sum apart, and its timing equation
+  satisfied,
+* neighbours counter-rotating, and `teeth * omega` conserved across every joint,
+* an idler turning at exactly its neighbour's speed, and a step actually stepping
+  in the right direction (into a smaller gear must speed up, never slow down),
+* **gears that do not mesh with each other not overlapping**,
+* every gear turning, the overall ratio inside the intended band, and at least one
+  step present.
+
+It also pins down the generator itself: the same seed must reproduce the same
+tooth counts, phases and layout, different seeds must not all collapse onto one
+train, an unspecified count must stay in range and an out-of-range one must be
+clamped.
 
 The renderer itself is checked by running with the Khronos validation layer
 enabled (it is vendored by `fetch_deps.sh` and picked up automatically), and by

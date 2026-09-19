@@ -26,7 +26,6 @@ namespace vkg {
 namespace {
 
 const int   kFramesInFlight    = 2;
-const int   kGearCount         = 3;
 const int   kCheckerTextureSize = 256;
 const int   kCheckerCells      = 8;
 
@@ -344,6 +343,8 @@ AppOptions::AppOptions()
       backfaceCulling(true),
       checkerScale(1),
       speed(1.15f),
+      gearCount(0),   // 0 = draw a random count
+      seed(0),        // 0 = take one from the clock
       listDevices(false),
       verbose(false) {}
 
@@ -491,36 +492,18 @@ VulkanGears::VulkanGears()
       startTime_(-1.0),
       endTime_(-1.0),
       gearTriangleTotal_(0),
-      gearVertexTotal_(0) {
+      gearVertexTotal_(0),
+      seed_(0) {
     std::memset(&deviceProperties_, 0, sizeof(deviceProperties_));
     std::memset(&memoryProperties_, 0, sizeof(memoryProperties_));
     std::memset(&driverProperties_, 0, sizeof(driverProperties_));
     std::memset(&surfaceCapabilities_, 0, sizeof(surfaceCapabilities_));
     std::memset(cameraPosition_, 0, sizeof(cameraPosition_));
     std::memset(viewProj_, 0, sizeof(viewProj_));
-    for (int i = 0; i < kGearCount; ++i) {
-        std::memset(&specs_[i], 0, sizeof(GearSpec));
-        gearBuffers_[i].vertexBuffer = VK_NULL_HANDLE;
-        gearBuffers_[i].vertexMemory = VK_NULL_HANDLE;
-        gearBuffers_[i].vertexBytes = 0;
-        gearBuffers_[i].indexBuffer = VK_NULL_HANDLE;
-        gearBuffers_[i].indexMemory = VK_NULL_HANDLE;
-        gearBuffers_[i].indexBytes = 0;
-        gearBuffers_[i].indexCount = 0;
-    }
-    // The gear train: a big driver, a small idler and a medium output gear,
-    // all with the same module so the teeth really mesh.
-    specs_[0].teeth = 30; specs_[0].module = 1.0f; specs_[0].thickness = 3.4f;
-    specs_[0].label = "gear A 30T";
-    specs_[0].color[0] = 0.34f; specs_[0].color[1] = 0.56f; specs_[0].color[2] = 1.00f;
-
-    specs_[1].teeth = 14; specs_[1].module = 1.0f; specs_[1].thickness = 3.4f;
-    specs_[1].label = "gear B 14T";
-    specs_[1].color[0] = 1.00f; specs_[1].color[1] = 0.44f; specs_[1].color[2] = 0.20f;
-
-    specs_[2].teeth = 22; specs_[2].module = 1.0f; specs_[2].thickness = 3.4f;
-    specs_[2].label = "gear C 22T";
-    specs_[2].color[0] = 0.36f; specs_[2].color[1] = 0.95f; specs_[2].color[2] = 0.46f;
+    // The gear specs and their GPU buffers are built in createGearBuffers, once
+    // the train has been generated.  gearCount_ stays 0 until then, which is
+    // what tells the destructor there is nothing to release.
+    gearCount_ = 0;
 }
 
 VulkanGears::~VulkanGears() { shutdown(); }
@@ -1585,14 +1568,26 @@ bool VulkanGears::createGearBuffers(std::string& error) {
     gearTriangleTotal_ = 0;
     gearVertexTotal_ = 0;
 
-    for (int i = 0; i < kGearCount; ++i) {
-        const GearMesh& mesh = train_.meshes[i];
+    // The train has already been built, so its gear count is the truth;
+    // gearCount_ is set from it here rather than from the options, because the
+    // options may have said "random" and the seeder picked something.
+    gearCount_ = static_cast<int>(train_.meshes.size());
+    if (gearCount_ <= 0) {
+        error = "the gear train is empty";
+        return false;
+    }
+    specs_.resize(static_cast<size_t>(gearCount_));
+    gearBuffers_.assign(static_cast<size_t>(gearCount_), GearBuffers());
+
+    for (int i = 0; i < gearCount_; ++i) {
+        const GearMesh& mesh = train_.meshes[static_cast<size_t>(i)];
         if (mesh.vertices.empty() || mesh.indices.empty()) {
-            error = diag::format("%s: empty mesh", specs_[i].label);
+            error = diag::format("%s: empty mesh", specs_[static_cast<size_t>(i)].label.c_str());
             return false;
         }
         if (mesh.vertices.size() > 65535) {
-            error = diag::format("%s: mesh has too many vertices for 16 bit indices", specs_[i].label);
+            error = diag::format("%s: mesh has too many vertices for 16 bit indices",
+                                 specs_[static_cast<size_t>(i)].label.c_str());
             return false;
         }
 
@@ -1602,40 +1597,65 @@ bool VulkanGears::createGearBuffers(std::string& error) {
         if (!createBuffer(vertexBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                          "gear vertex buffers", gearBuffers_[i].vertexBuffer, gearBuffers_[i].vertexMemory)) {
-            error = diag::format("%s: could not create the vertex buffer", specs_[i].label);
+                          "gear vertex buffers", gearBuffers_[static_cast<size_t>(i)].vertexBuffer,
+                          gearBuffers_[static_cast<size_t>(i)].vertexMemory)) {
+            error = diag::format("%s: could not create the vertex buffer",
+                                 specs_[static_cast<size_t>(i)].label.c_str());
             return false;
         }
         void* mapped = 0;
-        if (vkMapMemory(device_, gearBuffers_[i].vertexMemory, 0, vertexBytes, 0, &mapped) != VK_SUCCESS) {
-            error = diag::format("%s: could not map the vertex buffer", specs_[i].label);
+        if (vkMapMemory(device_, gearBuffers_[static_cast<size_t>(i)].vertexMemory, 0, vertexBytes, 0, &mapped) != VK_SUCCESS) {
+            error = diag::format("%s: could not map the vertex buffer",
+                                 specs_[static_cast<size_t>(i)].label.c_str());
             return false;
         }
         std::memcpy(mapped, &mesh.vertices[0], static_cast<size_t>(vertexBytes));
-        vkUnmapMemory(device_, gearBuffers_[i].vertexMemory);
+        vkUnmapMemory(device_, gearBuffers_[static_cast<size_t>(i)].vertexMemory);
 
         if (!createBuffer(indexBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                          "gear index buffers", gearBuffers_[i].indexBuffer, gearBuffers_[i].indexMemory)) {
-            error = diag::format("%s: could not create the index buffer", specs_[i].label);
+                          "gear index buffers", gearBuffers_[static_cast<size_t>(i)].indexBuffer,
+                          gearBuffers_[static_cast<size_t>(i)].indexMemory)) {
+            error = diag::format("%s: could not create the index buffer",
+                                 specs_[static_cast<size_t>(i)].label.c_str());
             return false;
         }
-        if (vkMapMemory(device_, gearBuffers_[i].indexMemory, 0, indexBytes, 0, &mapped) != VK_SUCCESS) {
-            error = diag::format("%s: could not map the index buffer", specs_[i].label);
+        if (vkMapMemory(device_, gearBuffers_[static_cast<size_t>(i)].indexMemory, 0, indexBytes, 0, &mapped) != VK_SUCCESS) {
+            error = diag::format("%s: could not map the index buffer",
+                                 specs_[static_cast<size_t>(i)].label.c_str());
             return false;
         }
         std::memcpy(mapped, &mesh.indices[0], static_cast<size_t>(indexBytes));
-        vkUnmapMemory(device_, gearBuffers_[i].indexMemory);
+        vkUnmapMemory(device_, gearBuffers_[static_cast<size_t>(i)].indexMemory);
 
-        gearBuffers_[i].vertexBytes = vertexBytes;
-        gearBuffers_[i].indexBytes = indexBytes;
-        gearBuffers_[i].indexCount = static_cast<uint32_t>(mesh.indices.size());
+        gearBuffers_[static_cast<size_t>(i)].vertexBytes = vertexBytes;
+        gearBuffers_[static_cast<size_t>(i)].indexBytes = indexBytes;
+        gearBuffers_[static_cast<size_t>(i)].indexCount = static_cast<uint32_t>(mesh.indices.size());
 
         gearTriangleTotal_ += mesh.triangleCount;
         gearVertexTotal_ += mesh.vertices.size();
     }
     return true;
+}
+
+bool VulkanGears::buildGearTrainAndBuffers(std::string& error) {
+    // A seed the caller supplied is used as given, so a train can be reproduced
+    // exactly.  Only when there is none does the clock provide one, and that
+    // value is kept so the diagnostics can report which seed would reproduce
+    // what just appeared on screen.
+    seed_ = options_.seed;
+    if (seed_ == 0u) {
+        seed_ = static_cast<uint32_t>(steadySeconds() * 1000.0);
+        if (seed_ == 0u) { seed_ = 1u; } // 0 means "no seed" to makeGearTrain
+    }
+
+    std::vector<float> jointAngles;
+    if (!makeGearTrain(options_.gearCount, seed_, options_.speed,
+                       specs_, jointAngles, train_, error)) {
+        return false;
+    }
+    return createGearBuffers(error);
 }
 
 bool VulkanGears::createCheckerTexture(std::string& error) {
@@ -1923,9 +1943,7 @@ bool VulkanGears::initWindowed(GLFWwindow* window, const AppOptions& options, st
     if (!createDescriptorSetLayout(error)) { return false; }
     if (!createGraphicsPipeline(error)) { return false; }
 
-    const float jointAngles[2] = { 12.0f, -42.0f };
-    if (!buildGearTrain(specs_, jointAngles, options_.speed, train_, error)) { return false; }
-    if (!createGearBuffers(error)) { return false; }
+    if (!buildGearTrainAndBuffers(error)) { return false; }
     if (!createCheckerTexture(error)) { return false; }
     if (!createUniformBuffers(error)) { return false; }
     if (!createDescriptorPool(error)) { return false; }
@@ -1964,9 +1982,7 @@ bool VulkanGears::initHeadless(const AppOptions& options, std::string& error) {
     if (!createDescriptorSetLayout(error)) { return false; }
     if (!createGraphicsPipeline(error)) { return false; }
 
-    const float jointAngles[2] = { 12.0f, -42.0f };
-    if (!buildGearTrain(specs_, jointAngles, options_.speed, train_, error)) { return false; }
-    if (!createGearBuffers(error)) { return false; }
+    if (!buildGearTrainAndBuffers(error)) { return false; }
     if (!createCheckerTexture(error)) { return false; }
     if (!createUniformBuffers(error)) { return false; }
     if (!createDescriptorPool(error)) { return false; }
@@ -2131,7 +2147,7 @@ bool VulkanGears::recordCommandBuffer(VkCommandBuffer commandBuffer,
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                             0, 1, &descriptorSets_[frameIndex], 0, 0);
 
-    for (uint32_t gear = 0; gear < static_cast<uint32_t>(kGearCount); ++gear) {
+    for (uint32_t gear = 0; gear < static_cast<uint32_t>(gearCount_); ++gear) {
         const VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, &gearBuffers_[gear].vertexBuffer, &offset);
         vkCmdBindIndexBuffer(commandBuffer, gearBuffers_[gear].indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -2240,7 +2256,7 @@ bool VulkanGears::drawFrame(std::string& error) {
     result = vkQueuePresentKHR(presentQueue_, &presentInfo);
 
     ++framesRendered_;
-    drawCalls_ += kGearCount;
+    drawCalls_ += static_cast<uint64_t>(gearCount_);
     fps_.tick(now);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized_) {
@@ -2301,7 +2317,7 @@ bool VulkanGears::renderOffscreenFrames(int count, std::string& error) {
         vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
 
         ++framesRendered_;
-        drawCalls_ += kGearCount;
+        drawCalls_ += static_cast<uint64_t>(gearCount_);
         currentFrame_ = (currentFrame_ + 1) % kFramesInFlight;
 
         // Offscreen rendering waits for the GPU every frame, so the frame time
@@ -2415,24 +2431,27 @@ bool VulkanGears::recreateSwapchain(std::string& error) {
 // ---------------------------------------------------------------------------
 
 void VulkanGears::destroyGearBuffers() {
-    for (int i = 0; i < kGearCount; ++i) {
-        if (gearBuffers_[i].vertexBuffer != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device_, gearBuffers_[i].vertexBuffer, 0);
-            gearBuffers_[i].vertexBuffer = VK_NULL_HANDLE;
+    for (int i = 0; i < gearCount_; ++i) {
+        if (gearBuffers_[static_cast<size_t>(i)].vertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, gearBuffers_[static_cast<size_t>(i)].vertexBuffer, 0);
+            gearBuffers_[static_cast<size_t>(i)].vertexBuffer = VK_NULL_HANDLE;
         }
-        if (gearBuffers_[i].vertexMemory != VK_NULL_HANDLE) {
-            vkFreeMemory(device_, gearBuffers_[i].vertexMemory, 0);
-            gearBuffers_[i].vertexMemory = VK_NULL_HANDLE;
+        if (gearBuffers_[static_cast<size_t>(i)].vertexMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, gearBuffers_[static_cast<size_t>(i)].vertexMemory, 0);
+            gearBuffers_[static_cast<size_t>(i)].vertexMemory = VK_NULL_HANDLE;
         }
-        if (gearBuffers_[i].indexBuffer != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device_, gearBuffers_[i].indexBuffer, 0);
-            gearBuffers_[i].indexBuffer = VK_NULL_HANDLE;
+        if (gearBuffers_[static_cast<size_t>(i)].indexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, gearBuffers_[static_cast<size_t>(i)].indexBuffer, 0);
+            gearBuffers_[static_cast<size_t>(i)].indexBuffer = VK_NULL_HANDLE;
         }
-        if (gearBuffers_[i].indexMemory != VK_NULL_HANDLE) {
-            vkFreeMemory(device_, gearBuffers_[i].indexMemory, 0);
-            gearBuffers_[i].indexMemory = VK_NULL_HANDLE;
+        if (gearBuffers_[static_cast<size_t>(i)].indexMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, gearBuffers_[static_cast<size_t>(i)].indexMemory, 0);
+            gearBuffers_[static_cast<size_t>(i)].indexMemory = VK_NULL_HANDLE;
         }
     }
+    gearBuffers_.clear();
+    // Zeroed so a second shutdown, or one after a failed init, does nothing.
+    gearCount_ = 0;
 }
 
 void VulkanGears::destroyTexture() {
@@ -2672,10 +2691,9 @@ std::string VulkanGears::liveMemorySummary() const {
     return out;
 }
 
-void VulkanGears::printDiagnostics() const {
-    diag::logRaw("");
+void VulkanGears::printDiagnostics() const {    diag::logRaw("");
     diag::logRaw("================================================================");
-    diag::logRaw(" vulkangears - three meshing, checker-textured spinning gears");
+    diag::logRaw(" vulkangears - a train of meshing, checker-textured spinning gears");
     diag::logRaw("================================================================");
     diag::logRaw(diag::format(" Vulkan loader       : %s   (instance API %s, %u device(s) present)",
                               apiVersionString(loaderApiVersion_).c_str(),
@@ -2745,17 +2763,45 @@ void VulkanGears::printDiagnostics() const {
     diag::logRaw(diag::format(" Checker texture     : %dx%d, %dx%d cells, %d mip levels, %s filtering",
                               checkerSize_, checkerSize_, checkerCells_, checkerCells_, checkerLevels_,
                               samplerAnisotropy_ ? "anisotropic + trilinear" : "trilinear"));
-    diag::logRaw(diag::format(" Gear train          : %dT (%.2f r) -> %dT (%.2f r) -> %dT (%.2f r), module %.2f",
-                              specs_[0].teeth, train_.meshes[0].pitchRadius,
-                              specs_[1].teeth, train_.meshes[1].pitchRadius,
-                              specs_[2].teeth, train_.meshes[2].pitchRadius,
-                              specs_[0].module));
-    diag::logRaw(diag::format(" Mesh timing error   : joint A-B %+.4f %%, joint B-C %+.4f %% of a tooth pitch",
-                              train_.meshResidualPercent[0], train_.meshResidualPercent[1]));
-    diag::logRaw(diag::format(" Geometry            : %llu triangles, %llu vertices, %llu draw calls per frame",
+    diag::logRaw(diag::format(" Gear train          : %s, module %.2f%s",
+                              toothProfile(&specs_[0], gearCount_).c_str(),
+                              specs_[0].module,
+                              (options_.gearCount > 0) ? "" : " (count chosen at random)"));
+    diag::logRaw(diag::format(" Train seed          : %u  (--seed %u reproduces this train)",
+                              seed_, seed_));
+    diag::logRaw(diag::format(" Train shape         : %d idler stage(s), %d step-up, %d step-down",
+                              train_.stats.idlerCount, train_.stats.speedUpCount,
+                              train_.stats.slowDownCount));
+    // The per-stage ratios, which are the whole point of mixing idlers with
+    // steps: an idler is 1.00 and a step is what changes the output speed.
+    {
+        std::string ratios;
+        for (size_t i = 0; i < train_.jointRatios.size(); ++i) {
+            if (i != 0) { ratios += " "; }
+            const bool idler = (specs_[i].teeth == specs_[i + 1].teeth);
+            ratios += diag::format("%.2f%s", train_.jointRatios[i], idler ? "(idler)" : "");
+        }
+        diag::logRaw(diag::format(" Stage ratios        : %s",
+                                  ratios.empty() ? "(none)" : ratios.c_str()));
+    }
+    diag::logRaw(diag::format(" Overall ratio       : %.3f x  (last gear vs first, sign dropped)",
+                              std::fabs(train_.stats.overallRatio)));
+    diag::logRaw(diag::format(" Speed range         : %.3f .. %.3f rad/s",
+                              train_.stats.slowestSpeed, train_.stats.fastestSpeed));
+    {
+        // The largest timing error anywhere in the train, so one line answers
+        // "is this train correctly meshed" instead of a list per joint.
+        float worst = 0.0f;
+        for (size_t i = 0; i < train_.meshResidualPercent.size(); ++i) {
+            worst = std::max(worst, std::fabs(train_.meshResidualPercent[i]));
+        }
+        diag::logRaw(diag::format(" Mesh timing error   : %.4f %% of a tooth pitch (worst of %d joint(s))",
+                                  worst, static_cast<int>(train_.meshResidualPercent.size())));
+    }
+    diag::logRaw(diag::format(" Geometry            : %llu triangles, %llu vertices, %d draw calls per frame",
                               static_cast<unsigned long long>(gearTriangleTotal_),
                               static_cast<unsigned long long>(gearVertexTotal_),
-                              static_cast<unsigned long long>(kGearCount)));
+                              gearCount_));
     diag::logRaw(" Memory heaps:");
     diag::logRaw(heapTable());
     diag::logRaw(" Application allocations:");

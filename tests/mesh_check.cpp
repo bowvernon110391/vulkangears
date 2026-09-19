@@ -120,6 +120,167 @@ bool segmentsCross(const Point& a, const Point& b, const Point& c, const Point& 
            ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps));
 }
 
+// ---------------------------------------------------------------------------
+// Property check for a generated train.
+//
+// The random trains are not checked against expected numbers -- there are none
+// to check, since the whole point is that they vary.  They are checked against
+// the properties that make something a gear train at all, which must hold for
+// every seed and every gear count:
+//
+//   * one module throughout, or the teeth could not mesh,
+//   * each joint's centres exactly a pitch-sum apart,
+//   * each joint's timing equation satisfied and its teeth coupled,
+//   * neighbours counter-rotating, and an idler turning at exactly the same
+//     speed as the gear driving it,
+//   * gears that do not mesh with each other not overlapping,
+//   * every gear actually turning, and the whole train within a speed band.
+//
+// Returns the number of violations; `firstProblem` receives the first one.
+// ---------------------------------------------------------------------------
+int trainProblems(const std::vector<GearSpec>& specs,
+                  const GearTrain& train,
+                  std::string& firstProblem) {
+    const int count = static_cast<int>(specs.size());
+    int problems = 0;
+
+    auto fail = [&](const std::string& what) {
+        if (problems == 0) { firstProblem = what; }
+        ++problems;
+    };
+
+    if (static_cast<int>(train.meshes.size()) != count ||
+        static_cast<int>(train.gears.size()) != count) {
+        fail(diag::format("train has %d meshes and %d placements for %d specs",
+                          static_cast<int>(train.meshes.size()),
+                          static_cast<int>(train.gears.size()), count));
+        return problems; // everything below indexes these
+    }
+    if (static_cast<int>(train.meshResidualPercent.size()) != count - 1 ||
+        static_cast<int>(train.jointRatios.size()) != count - 1) {
+        fail("the joint arrays are the wrong length for the gear count");
+    }
+
+    const int steps = (count - 1 < static_cast<int>(train.jointRatios.size()))
+                          ? count - 1
+                          : static_cast<int>(train.jointRatios.size());
+
+    for (int i = 0; i < count; ++i) {
+        const int teeth = specs[i].teeth;
+        if (teeth < kMinGearTeeth || teeth > kMaxGearTeeth) {
+            fail(diag::format("gear %d has %d teeth, outside [%d, %d]",
+                              i, teeth, kMinGearTeeth, kMaxGearTeeth));
+        }
+        if (std::fabs(specs[i].module - specs[0].module) > 1e-6f) {
+            fail(diag::format("gear %d has module %g but gear 0 has %g",
+                              i, specs[i].module, specs[0].module));
+        }
+        if (!(std::fabs(train.gears[i].angularSpeed) > 1e-6f)) {
+            fail(diag::format("gear %d does not turn at all", i));
+        }
+    }
+
+    for (int i = 0; i < steps; ++i) {
+        const GearMesh& a = train.meshes[i];
+        const GearMesh& b = train.meshes[i + 1];
+        const GearPlacement& pa = train.gears[i];
+        const GearPlacement& pb = train.gears[i + 1];
+
+        // Centre distance: the pitch circles must touch exactly, or the teeth
+        // are either not engaging or jammed into each other.
+        const float dx = pb.position[0] - pa.position[0];
+        const float dy = pb.position[1] - pa.position[1];
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        const float expected = a.pitchRadius + b.pitchRadius;
+        if (std::fabs(distance - expected) > 1e-3f) {
+            fail(diag::format("joint %d centres are %.5f apart, the pitch sum is %.5f",
+                              i, distance, expected));
+        }
+
+        // Tight, because the residual is now evaluated in double.  It used to be
+        // computed in float, where the terms (tooth counts times angles) reach
+        // ~100 while the residual itself has to resolve ~1e-4 -- a cancellation
+        // problem whose error grew along a long train.  That showed up as a
+        // residual of ~0.01 % on a twelve gear train, which was the measurement
+        // failing rather than the geometry.  Measured across 80 seeds the worst
+        // is now 0.0000 %, so this threshold still has room to catch a real bug.
+        if (std::fabs(train.meshResidualPercent[i]) > 1e-3f) {
+            fail(diag::format("joint %d timing residual is %+.6f %%",
+                              i, train.meshResidualPercent[i]));
+        }
+
+        const float coupling = static_cast<float>(specs[i].teeth) * pa.angularSpeed +
+                               static_cast<float>(specs[i + 1].teeth) * pb.angularSpeed;
+        if (std::fabs(coupling) > 1e-4f) {
+            fail(diag::format("joint %d breaks teeth*w = const by %+.6f", i, coupling));
+        }
+
+        if (!(pa.angularSpeed * pb.angularSpeed < 0.0f)) {
+            fail(diag::format("joint %d does not counter rotate", i));
+        }
+
+        // An idler is the case worth naming: same tooth count, and therefore
+        // exactly the same speed, which is what makes a long train watchable.
+        if (specs[i + 1].teeth == specs[i].teeth) {
+            if (std::fabs(std::fabs(pb.angularSpeed) - std::fabs(pa.angularSpeed)) > 1e-5f) {
+                fail(diag::format("joint %d is an idler but speeds differ (%.6f vs %.6f)",
+                                  i, pa.angularSpeed, pb.angularSpeed));
+            }
+            if (std::fabs(train.jointRatios[i] - 1.0f) > 1e-5f) {
+                fail(diag::format("joint %d is an idler but its ratio is %.6f",
+                                  i, train.jointRatios[i]));
+            }
+        } else {
+            // A step must actually step: not a ratio of one, and its direction
+            // must match whether the next gear got smaller or larger.
+            const float speedRatio = std::fabs(pb.angularSpeed / pa.angularSpeed);
+            const bool gotSmaller = specs[i + 1].teeth < specs[i].teeth;
+            if (std::fabs(speedRatio - 1.0f) < 1e-5f) {
+                fail(diag::format("joint %d is marked a step but the speed is unchanged", i));
+            }
+            if (gotSmaller && !(speedRatio > 1.0f)) {
+                fail(diag::format("joint %d meshes into a smaller gear (%d -> %d) but slowed down (%.4f)",
+                                  i, specs[i].teeth, specs[i + 1].teeth, speedRatio));
+            }
+            if (!gotSmaller && !(speedRatio < 1.0f)) {
+                fail(diag::format("joint %d meshes into a larger gear (%d -> %d) but sped up (%.4f)",
+                                  i, specs[i].teeth, specs[i + 1].teeth, speedRatio));
+            }
+        }
+    }
+
+    // Gears that are not meshed with each other must not occupy the same space.
+    // Adjacent pairs are excluded because they are supposed to touch.
+    for (int i = 0; i < count; ++i) {
+        for (int j = i + 2; j < count; ++j) {
+            const float dx = train.gears[j].position[0] - train.gears[i].position[0];
+            const float dy = train.gears[j].position[1] - train.gears[i].position[1];
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float tipSum = train.meshes[i].tipRadius + train.meshes[j].tipRadius;
+            if (distance <= tipSum) {
+                fail(diag::format("gears %d and %d are not meshed but overlap (%.3f apart, tips %.3f)",
+                                  i, j, distance, tipSum));
+            }
+        }
+    }
+
+    // The speed band.  An unsteered train of fifteen gears can reach 100:1, at
+    // which point the far end is either frozen or strobing; the generator is
+    // supposed to steer back before that.
+    const float overall = std::fabs(train.stats.overallRatio);
+    if (overall < 0.25f || overall > 4.0f) {
+        fail(diag::format("overall ratio %.3f is outside the intended band [0.25, 4]", overall));
+    }
+
+    // Variety: a train of nothing but idlers is legal but demonstrates nothing,
+    // so the generator guarantees at least one step.
+    if (count > 2 && train.stats.speedUpCount + train.stats.slowDownCount == 0) {
+        fail("the train is all idlers");
+    }
+
+    return problems;
+}
+
 } // namespace
 
 int main() {
@@ -131,10 +292,13 @@ int main() {
     specs[2].teeth = 22; specs[2].module = 1.0f; specs[2].thickness = 3.4f; specs[2].label = "C";
     specs[2].color[0] = 1.0f; specs[2].color[1] = 0.0f; specs[2].color[2] = 0.0f;
 
-    const float jointAngles[2] = { 12.0f, -42.0f };
+    // This exact triple was the demo before the train became random, and it
+    // stays as a regression: the numbers below must not move because the
+    // geometry gained a generator around it.
+    float jointAngles[2] = { 12.0f, -42.0f };
     GearTrain train;
     std::string error;
-    if (!buildGearTrain(specs, jointAngles, 1.15f, train, error)) {
+    if (!buildGearTrain(specs, 3, jointAngles, 1.15f, train, error)) {
         std::printf("buildGearTrain failed: %s\n", error.c_str());
         return 1;
     }
@@ -368,6 +532,195 @@ int main() {
         const float tipSum = train.meshes[0].tipRadius + train.meshes[2].tipRadius;
         check(distance > tipSum,
               diag::format("outer gears A and C do not touch (%.3f apart, tips would need %.3f)", distance, tipSum));
+    }
+
+    // ---- randomised trains ------------------------------------------------
+    std::printf("\nrandom trains\n");
+    {
+        const unsigned seeds[] = { 1u, 5u, 42u, 1234u, 99991u };
+        const int seedCount = static_cast<int>(sizeof(seeds) / sizeof(seeds[0]));
+
+        int trainsChecked = 0;
+        int trainsBad = 0;
+        int firstBadCount = 0;
+        unsigned firstBadSeed = 0;
+        std::string firstProblem;
+
+        for (int count = kMinTrainGears; count <= kMaxTrainGears; ++count) {
+            for (int s = 0; s < seedCount; ++s) {
+                std::vector<GearSpec> generated;
+                std::vector<float> angles;
+                GearTrain randomTrain;
+                std::string buildError;
+                if (!makeGearTrain(count, seeds[s], 1.15f, generated, angles, randomTrain,
+                                   buildError)) {
+                    if (trainsBad == 0) {
+                        firstProblem = "makeGearTrain failed: " + buildError;
+                        firstBadCount = count;
+                        firstBadSeed = seeds[s];
+                    }
+                    ++trainsBad;
+                    ++trainsChecked;
+                    continue;
+                }
+
+                if (static_cast<int>(generated.size()) != count) {
+                    if (trainsBad == 0) {
+                        firstProblem = diag::format("asked for %d gears, got %d",
+                                                    count, static_cast<int>(generated.size()));
+                        firstBadCount = count;
+                        firstBadSeed = seeds[s];
+                    }
+                    ++trainsBad;
+                    ++trainsChecked;
+                    continue;
+                }
+
+                std::string problem;
+                const int problems = trainProblems(generated, randomTrain, problem);
+                ++trainsChecked;
+                if (problems > 0) {
+                    if (trainsBad == 0) {
+                        firstProblem = problem;
+                        firstBadCount = count;
+                        firstBadSeed = seeds[s];
+                    }
+                    ++trainsBad;
+                }
+            }
+        }
+
+        check(trainsBad == 0,
+              diag::format("%d generated trains (%d..%d gears) all satisfy the meshing properties",
+                           trainsChecked, kMinTrainGears, kMaxTrainGears));
+        if (trainsBad > 0) {
+            std::printf("        first failure: %d gears, seed %u: %s\n",
+                        firstBadCount, firstBadSeed, firstProblem.c_str());
+        }
+
+        // Requesting nothing means a count in range, and requesting something
+        // out of range is clamped rather than rejected, so a bad value on a
+        // command line still yields a train.
+        bool countInRange = true;
+        bool clampingWorks = true;
+        for (int s = 0; s < 40; ++s) {
+            std::vector<GearSpec> generated;
+            std::vector<float> angles;
+            GearTrain anyTrain;
+            std::string buildError;
+            if (makeGearTrain(0, static_cast<uint32_t>(s + 1), 1.15f, generated, angles, anyTrain,
+                              buildError)) {
+                const int got = static_cast<int>(generated.size());
+                if (got < kMinTrainGears || got > kMaxTrainGears) { countInRange = false; }
+            } else {
+                countInRange = false;
+            }
+        }
+        check(countInRange, diag::format("an unspecified gear count stays within %d..%d",
+                                         kMinTrainGears, kMaxTrainGears));
+
+        {
+            std::vector<GearSpec> low;
+            std::vector<GearSpec> high;
+            std::vector<float> anglesA;
+            std::vector<float> anglesB;
+            GearTrain trainA;
+            GearTrain trainB;
+            std::string buildError;
+            clampingWorks = makeGearTrain(1, 3u, 1.15f, low, anglesA, trainA, buildError) &&
+                            makeGearTrain(999, 3u, 1.15f, high, anglesB, trainB, buildError) &&
+                            static_cast<int>(low.size()) == kMinTrainGears &&
+                            static_cast<int>(high.size()) == kMaxTrainGears;
+        }
+        check(clampingWorks, diag::format("counts below %d or above %d are clamped into range",
+                                          kMinTrainGears, kMaxTrainGears));
+
+        // Determinism.  A seed that does not reproduce its train would make
+        // every screenshot unquotable and every failure unrepeatable, and it is
+        // the reason the generator avoids <random>'s distributions.
+        bool reproducible = true;
+        for (int s = 0; s < 8; ++s) {
+            const uint32_t seed = static_cast<uint32_t>(s * 137 + 11);
+            std::vector<GearSpec> a;
+            std::vector<GearSpec> b;
+            std::vector<float> anglesA;
+            std::vector<float> anglesB;
+            GearTrain trainA;
+            GearTrain trainB;
+            std::string buildError;
+            if (!makeGearTrain(0, seed, 1.15f, a, anglesA, trainA, buildError) ||
+                !makeGearTrain(0, seed, 1.15f, b, anglesB, trainB, buildError)) {
+                reproducible = false;
+                break;
+            }
+            if (a.size() != b.size() || anglesA.size() != anglesB.size()) {
+                reproducible = false;
+                break;
+            }
+            for (size_t i = 0; i < a.size() && reproducible; ++i) {
+                if (a[i].teeth != b[i].teeth || a[i].module != b[i].module) {
+                    reproducible = false;
+                }
+                // Phases are solved rather than drawn, so matching tooth counts
+                // is not enough on its own: the geometry has to match too.
+                if (std::fabs(trainA.gears[i].phase - trainB.gears[i].phase) > 1e-6f) {
+                    reproducible = false;
+                }
+            }
+            for (size_t i = 0; i < anglesA.size() && reproducible; ++i) {
+                if (std::fabs(anglesA[i] - anglesB[i]) > 1e-6f) { reproducible = false; }
+            }
+        }
+        check(reproducible, "the same seed produces the same train, tooth counts and layout");
+
+        // Different seeds should not all collapse onto one train, or the seed
+        // would be doing nothing.
+        {
+            std::string firstProfile;
+            int distinct = 0;
+            for (int s = 0; s < 20; ++s) {
+                std::vector<GearSpec> generated;
+                std::vector<float> angles;
+                GearTrain anyTrain;
+                std::string buildError;
+                if (!makeGearTrain(0, static_cast<uint32_t>(s + 1), 1.15f, generated, angles,
+                                   anyTrain, buildError)) {
+                    continue;
+                }
+                const std::string profile = toothProfile(&generated[0], static_cast<int>(generated.size()));
+                if (s == 0) { firstProfile = profile; }
+                else if (profile != firstProfile) { ++distinct; }
+            }
+            check(distinct > 10, diag::format("%d of 19 other seeds produced a different train", distinct));
+        }
+
+        // A report of what the sweep actually covered, so the numbers above are
+        // not the only evidence that the generator does something.
+        {
+            int minGears = 99;
+            int maxGears = 0;
+            int maxIdlers = 0;
+            std::string widest;
+            for (int s = 0; s < 40; ++s) {
+                std::vector<GearSpec> generated;
+                std::vector<float> angles;
+                GearTrain anyTrain;
+                std::string buildError;
+                if (!makeGearTrain(0, static_cast<uint32_t>(s + 1), 1.15f, generated, angles,
+                                   anyTrain, buildError)) {
+                    continue;
+                }
+                const int got = static_cast<int>(generated.size());
+                if (got < minGears) { minGears = got; }
+                if (got > maxGears) { maxGears = got; }
+                if (anyTrain.stats.idlerCount > maxIdlers) { maxIdlers = anyTrain.stats.idlerCount; }
+                const std::string profile = toothProfile(&generated[0], got);
+                if (profile.size() > widest.size()) { widest = profile; }
+            }
+            std::printf("        40 seeds: %d..%d gears, up to %d idlers in one train\n",
+                        minGears, maxGears, maxIdlers);
+            std::printf("        widest train: %s\n", widest.c_str());
+        }
     }
 
     // ---- texture ----------------------------------------------------------

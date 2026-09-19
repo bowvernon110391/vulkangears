@@ -36,6 +36,8 @@ struct AppOptions {
     bool        backfaceCulling;
     int         checkerScale;       // integer checker frequency multiplier
     float       speed;              // gear A angular speed, rad/s
+    int         gearCount;          // 0 = random, otherwise clamped to [3, 15]
+    uint32_t    seed;               // 0 = clock, otherwise reproducible
     bool        listDevices;
     bool        verbose;            // include informational layer messages
 
@@ -108,6 +110,7 @@ private:
     bool createFramebuffers(std::string& error);
     bool createDescriptorSetLayout(std::string& error);
     bool createGraphicsPipeline(std::string& error);
+    bool buildGearTrainAndBuffers(std::string& error);
     bool createGearBuffers(std::string& error);
     bool createCheckerTexture(std::string& error);
     bool createUniformBuffers(std::string& error);
@@ -240,8 +243,10 @@ private:
     VkPipeline            pipeline_;
     std::vector<VkFramebuffer> framebuffers_;
 
-    GearSpec  specs_[3];
-    GearTrain train_;
+    // One entry per gear, plus per-gear GPU buffers.  Sized at init from
+    // options_.gearCount, which may have been drawn at random.
+    std::vector<GearSpec> specs_;
+    GearTrain             train_;
     struct GearBuffers {
         VkBuffer       vertexBuffer;
         VkDeviceMemory vertexMemory;
@@ -251,7 +256,8 @@ private:
         VkDeviceSize   indexBytes;
         uint32_t       indexCount;
     };
-    GearBuffers gearBuffers_[3];
+    std::vector<GearBuffers> gearBuffers_;
+    int                      gearCount_;
 
     VkImage        checkerImage_;
     VkDeviceMemory checkerMemory_;
@@ -290,6 +296,11 @@ private:
     diag::MemoryLedger    ledger_;
     uint64_t              gearTriangleTotal_;
     uint64_t              gearVertexTotal_;
+    // The seed the train was actually generated from, which is the clock's
+    // unless the caller supplied one.  Declared with the diagnostics because
+    // that is where it is reported, and the constructor's initialiser list has
+    // to follow declaration order.
+    uint32_t              seed_;
 };
 
 } // namespace vkg

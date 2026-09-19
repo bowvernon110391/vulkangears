@@ -1,6 +1,6 @@
 // vulkangears - a small Vulkan demo in the spirit of glxgears:
-// three meshing, checker-textured gears of different sizes, a resizable
-// 800x600 window, and a running console report of what the GPU is doing.
+// a random train of meshing, checker-textured gears, a resizable 800x600
+// window, and a running console report of what the GPU is doing.
 
 #include "diag.h"
 #include "platform.h"
@@ -33,7 +33,7 @@ void handleSignal(int) { g_quit = 1; }
 
 void printUsage(const char* executable) {
     std::printf(
-        "vulkangears - three meshing checker textured gears, rendered with Vulkan\n"
+        "vulkangears - a train of meshing checker textured gears, rendered with Vulkan\n"
         "\n"
         "usage: %s [options]\n"
         "\n"
@@ -52,6 +52,11 @@ void printUsage(const char* executable) {
         "  --no-validation      do not enable the Khronos validation layer\n"
         "  --verbose            also print informational messages from Vulkan layers\n"
         "\n"
+        "the gear train\n"
+        "  --gears N            number of gears, %d to %d (default: random)\n"
+        "  --seed N             random seed (default: the clock; the seed used is\n"
+        "                       printed, so any run can be reproduced with --seed)\n"
+        "\n"
         "device selection\n"
         "  --gpu N              use physical device N (see --list-devices)\n"
         "  --gpu-name TEXT      pick the first device whose name contains TEXT\n"
@@ -67,9 +72,13 @@ void printUsage(const char* executable) {
         "\n"
         "examples\n"
         "  %s                             # 800x600 window, console diagnostics\n"
+        "  %s --gears 5                   # exactly five gears\n"
+        "  %s --seed 1234                 # reproduce a particular train\n"
         "  %s --frames 600                # render 600 frames and quit\n"
         "  %s --headless --out shot.ppm   # offscreen render, no display needed\n",
-        executable, executable, executable, executable);
+        executable,
+        vkg::kMinTrainGears, vkg::kMaxTrainGears,
+        executable, executable, executable, executable, executable);
 }
 
 void glfwErrorCallback(int code, const char* description) {
@@ -156,6 +165,28 @@ bool parseArgs(int argc, char** argv, vkg::AppOptions& options, std::string& out
                 diag::logError("--speed needs a number");
                 return false;
             }
+        } else if (arg == "--gears") {
+            if (!needsValue(arg, i, argc) || !parseInteger(argv[++i], options.gearCount)) {
+                diag::logError("--gears needs an integer");
+                return false;
+            }
+            if (options.gearCount < vkg::kMinTrainGears || options.gearCount > vkg::kMaxTrainGears) {
+                diag::logError(diag::format("--gears must be between %d and %d (got %d)",
+                                            vkg::kMinTrainGears, vkg::kMaxTrainGears,
+                                            options.gearCount));
+                return false;
+            }
+        } else if (arg == "--seed") {
+            int seed = 0;
+            if (!needsValue(arg, i, argc) || !parseInteger(argv[++i], seed)) {
+                diag::logError("--seed needs an integer");
+                return false;
+            }
+            if (seed < 0) {
+                diag::logError("--seed must not be negative");
+                return false;
+            }
+            options.seed = static_cast<uint32_t>(seed);
         } else if (arg == "--out") {
             if (!needsValue(arg, i, argc)) { return false; }
             outputPath = argv[++i];

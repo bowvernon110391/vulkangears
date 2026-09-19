@@ -70,22 +70,34 @@ bool isPowerOfTwo(int v) { return v > 0 && (v & (v - 1)) == 0; }
 // it to (A,B) and then to (B,C) yields a correctly timed train.
 // ---------------------------------------------------------------------------
 float solveJointPhase(float teethI, float teethJ, float alphaIJ, float phiI) {
-    const float rhs = (teethI + teethJ) * alphaIJ + (teethJ - 1.0f) * PI - teethI * phiI;
-    const float pitch = TWO_PI / teethJ;
-    float phi = rhs / teethJ;
-    phi = std::fmod(phi, pitch);
-    if (phi < 0.0f) { phi += pitch; }
-    return phi;
+    // Evaluated in double.  The terms here are tooth counts multiplied by angles,
+    // so they reach ~100 while the phase has to be accurate to a small fraction
+    // of a tooth pitch; in float that is a cancellation problem, and the error
+    // it leaves behind accumulates along a long train, which is exactly what a
+    // random one of a dozen gears exercises.
+    const double i = teethI;
+    const double j = teethJ;
+    const double alpha = alphaIJ;
+    const double phi = phiI;
+
+    const double rhs = (i + j) * alpha + (j - 1.0) * PI - i * phi;
+    const double pitch = TWO_PI / j;
+    double solved = std::fmod(rhs / j, pitch);
+    if (solved < 0.0) { solved += pitch; }
+    return static_cast<float>(solved);
 }
 
 // How badly equation (2) is violated, as a percentage of one tooth pitch.
 float jointResidualPercent(float teethI, float teethJ, float alphaIJ, float phiI, float phiJ) {
-    float r = teethI * phiI + teethJ * phiJ - ((teethI + teethJ) * alphaIJ + (teethJ - 1.0f) * PI);
-    r = std::fmod(r, TWO_PI);
-    if (r > PI)  { r -= TWO_PI; }
-    if (r < -PI) { r += TWO_PI; }
-    // r lives in "tooth phase" radians where 2*PI is exactly one tooth pitch.
-    return r / TWO_PI * 100.0f;
+    const double i = teethI;
+    const double j = teethJ;
+    const double r = i * static_cast<double>(phiI) + j * static_cast<double>(phiJ) -
+                     ((i + j) * static_cast<double>(alphaIJ) + (j - 1.0) * PI);
+    double reduced = std::fmod(r, TWO_PI);
+    if (reduced > PI)  { reduced -= TWO_PI; }
+    if (reduced < -PI) { reduced += TWO_PI; }
+    // reduced lives in "tooth phase" radians where 2*PI is exactly one pitch.
+    return static_cast<float>(reduced / TWO_PI * 100.0);
 }
 
 } // namespace
@@ -95,18 +107,21 @@ float jointResidualPercent(float teethI, float teethJ, float alphaIJ, float phiI
 // ---------------------------------------------------------------------------
 
 bool buildGearMesh(const GearSpec& spec, GearMesh& out, std::string& error) {
-    const char* label = (spec.label != 0) ? spec.label : "gear";
+    const std::string label = spec.label.empty() ? std::string("gear") : spec.label;
 
     if (spec.teeth < 6) {
-        error = diag::format("%s: a gear needs at least 6 teeth (got %d)", label, spec.teeth);
+        error = diag::format("%s: a gear needs at least 6 teeth (got %d)",
+                             label.c_str(), spec.teeth);
         return false;
     }
     if (spec.module <= 0.0f) {
-        error = diag::format("%s: module must be positive (got %g)", label, spec.module);
+        error = diag::format("%s: module must be positive (got %g)",
+                             label.c_str(), spec.module);
         return false;
     }
     if (spec.thickness <= 0.0f) {
-        error = diag::format("%s: thickness must be positive (got %g)", label, spec.thickness);
+        error = diag::format("%s: thickness must be positive (got %g)",
+                             label.c_str(), spec.thickness);
         return false;
     }
 
@@ -117,7 +132,7 @@ bool buildGearMesh(const GearSpec& spec, GearMesh& out, std::string& error) {
     const float rootRadius  = pitchRadius - kDedendum * module;
 
     if (rootRadius <= 0.25f * pitchRadius) {
-        error = diag::format("%s: too few teeth for a usable root radius", label);
+        error = diag::format("%s: too few teeth for a usable root radius", label.c_str());
         return false;
     }
 
@@ -346,55 +361,85 @@ bool buildGearMesh(const GearSpec& spec, GearMesh& out, std::string& error) {
 }
 
 // ---------------------------------------------------------------------------
-// Gear train: three meshes, correctly timed and centred on the origin.
+// Gear train: N meshes, correctly timed and centred on the origin.
+//
+// The chain is built by walking from gear 0 outwards.  Everything about gear i+1
+// follows from gear i and the tooth counts: where its centre is, what phase it
+// starts at, and how fast it turns.  That is what makes an idler an idler -- with
+// equal tooth counts the speed ratio is 1 and only the direction changes -- and
+// it is also why a chain of a dozen gears is still a sensible object.
 // ---------------------------------------------------------------------------
 
-bool buildGearTrain(const GearSpec specs[3],
-                    const float jointAngleDeg[2],
+bool buildGearTrain(const GearSpec* specs,
+                    int count,
+                    float* jointAngleDeg,
                     float baseSpeed,
                     GearTrain& out,
                     std::string& error) {
-    for (int i = 0; i < 3; ++i) {
+    if (count < 2) {
+        error = diag::format("a train needs at least 2 gears (got %d)", count);
+        return false;
+    }
+
+    // One module across the train is the condition for meshing at all, so a
+    // mismatch is caught here rather than producing gears that nearly touch.
+    for (int i = 1; i < count; ++i) {
+        if (std::fabs(specs[i].module - specs[0].module) > 1e-6f) {
+            const std::string name = specs[i].label.empty() ? std::string("gear") : specs[i].label;
+            const std::string first = specs[0].label.empty() ? std::string("gear 0") : specs[0].label;
+            error = diag::format("%s: module %g differs from %s's %g, so the teeth cannot mesh",
+                                 name.c_str(), specs[i].module,
+                                 first.c_str(), specs[0].module);
+            return false;
+        }
+    }
+
+    out.meshes.assign(static_cast<size_t>(count), GearMesh());
+    out.gears.assign(static_cast<size_t>(count), GearPlacement());
+    out.meshResidualPercent.assign(static_cast<size_t>(count - 1), 0.0f);
+    out.jointRatios.assign(static_cast<size_t>(count - 1), 1.0f);
+
+    for (int i = 0; i < count; ++i) {
         if (!buildGearMesh(specs[i], out.meshes[i], error)) { return false; }
     }
 
     out.triangleCount = 0;
-    for (int i = 0; i < 3; ++i) { out.triangleCount += out.meshes[i].triangleCount; }
+    for (int i = 0; i < count; ++i) { out.triangleCount += out.meshes[i].triangleCount; }
 
-    const float alphaAB = toRadians(jointAngleDeg[0]);
-    const float alphaBC = toRadians(jointAngleDeg[1]);
+    // Centres, walked outwards from the first gear.  Each new gear sits one
+    // pitch-distance from the previous one along that joint's direction, which
+    // is exactly the condition for the two pitch circles to touch.
+    std::vector<float> px(static_cast<size_t>(count), 0.0f);
+    std::vector<float> py(static_cast<size_t>(count), 0.0f);
+    std::vector<float> alpha(static_cast<size_t>(count > 0 ? count - 1 : 0), 0.0f);
+    for (int i = 1; i < count; ++i) {
+        alpha[i - 1] = toRadians(jointAngleDeg[i - 1]);
+        px[i] = px[i - 1] + (out.meshes[i - 1].pitchRadius + out.meshes[i].pitchRadius) *
+                            std::cos(alpha[i - 1]);
+        py[i] = py[i - 1] + (out.meshes[i - 1].pitchRadius + out.meshes[i].pitchRadius) *
+                            std::sin(alpha[i - 1]);
+    }
 
-    // Centres: gear B sits one pitch-distance from A along alphaAB, and C one
-    // pitch-distance from B along alphaBC.  A drives B drives C, so the train
-    // is a chain (a closed loop of three external gears could not turn at all).
-    float px[3];
-    float py[3];
-    px[0] = 0.0f;
-    py[0] = 0.0f;
-    px[1] = px[0] + (out.meshes[0].pitchRadius + out.meshes[1].pitchRadius) * std::cos(alphaAB);
-    py[1] = py[0] + (out.meshes[0].pitchRadius + out.meshes[1].pitchRadius) * std::sin(alphaAB);
-    px[2] = px[1] + (out.meshes[1].pitchRadius + out.meshes[2].pitchRadius) * std::cos(alphaBC);
-    py[2] = py[1] + (out.meshes[1].pitchRadius + out.meshes[2].pitchRadius) * std::sin(alphaBC);
-
-    // Start phases from the joint equation.
-    const float teeth[3] = { static_cast<float>(specs[0].teeth),
-                             static_cast<float>(specs[1].teeth),
-                             static_cast<float>(specs[2].teeth) };
-    float phi[3];
+    // Start phases from the joint equation, and speeds from the coupling.
+    std::vector<float> teeth(static_cast<size_t>(count), 0.0f);
+    std::vector<float> phi(static_cast<size_t>(count), 0.0f);
+    std::vector<float> omega(static_cast<size_t>(count), 0.0f);
+    for (int i = 0; i < count; ++i) {
+        teeth[i] = static_cast<float>(specs[i].teeth);
+    }
     phi[0] = 0.0f;
-    phi[1] = solveJointPhase(teeth[0], teeth[1], alphaAB, phi[0]);
-    phi[2] = solveJointPhase(teeth[1], teeth[2], alphaBC, phi[1]);
-
-    // Angular speeds follow from (1): Ni*wi + Nj*wj = 0, so neighbouring gears
-    // always turn in opposite directions with speed ratio Ni/Nj.
-    float omega[3];
     omega[0] = baseSpeed;
-    omega[1] = -omega[0] * teeth[0] / teeth[1];
-    omega[2] = -omega[1] * teeth[1] / teeth[2];
+    for (int i = 1; i < count; ++i) {
+        phi[i] = solveJointPhase(teeth[i - 1], teeth[i], alpha[i - 1], phi[i - 1]);
+        // Ni*wi + Nj*wj = 0, so neighbouring gears always turn in opposite
+        // directions with a speed ratio of Ni/Nj.  Equal tooth counts give
+        // |wj| == |wi|, which is the idler case.
+        omega[i] = -omega[i - 1] * teeth[i - 1] / teeth[i];
+    }
 
     // Centre the arrangement on the origin so the camera maths stays simple.
     float minX = 1e30f, maxX = -1e30f, minY = 1e30f, maxY = -1e30f;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < count; ++i) {
         const float r = out.meshes[i].tipRadius;
         minX = std::min(minX, px[i] - r);
         maxX = std::max(maxX, px[i] + r);
@@ -408,7 +453,7 @@ bool buildGearTrain(const GearSpec specs[3],
     out.halfHeight = 0.5f * (maxY - minY);
 
     float boundingRadius = 0.0f;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < count; ++i) {
         const float x = px[i] - cx;
         const float y = py[i] - cy;
         out.gears[i].position[0] = x;
@@ -419,9 +464,362 @@ bool buildGearTrain(const GearSpec specs[3],
     }
     out.boundingRadius = boundingRadius;
 
-    out.meshResidualPercent[0] = jointResidualPercent(teeth[0], teeth[1], alphaAB, phi[0], phi[1]);
-    out.meshResidualPercent[1] = jointResidualPercent(teeth[1], teeth[2], alphaBC, phi[1], phi[2]);
+    // Report what was built: the timing error at each joint, the ratio at each
+    // joint, and the structure of the whole train.
+    out.stats = GearTrainStats();
+    out.stats.gearCount = count;    out.stats.overallRatio = (omega[0] != 0.0f) ? omega[count - 1] / omega[0] : 1.0f;
+    for (int i = 0; i < count; ++i) {
+        const float speed = std::fabs(omega[i]);
+        if (i == 0 || speed < out.stats.slowestSpeed) { out.stats.slowestSpeed = speed; }
+        if (i == 0 || speed > out.stats.fastestSpeed) { out.stats.fastestSpeed = speed; }
+    }
+    for (int i = 0; i < count - 1; ++i) {
+        out.meshResidualPercent[i] =
+            jointResidualPercent(teeth[i], teeth[i + 1], alpha[i], phi[i], phi[i + 1]);
+
+        // The physical speed ratio of this joint: how much faster the next gear
+        // turns than this one.  It is the reciprocal of the tooth-count ratio,
+        // because meshing into a *smaller* gear speeds the next one up.  Taking
+        // it from the speeds rather than the tooth counts means the sign of the
+        // ratio cannot be got wrong without contradicting omega above.
+        const float speedRatio = (omega[i] != 0.0f)
+                                     ? std::fabs(omega[i + 1] / omega[i])
+                                     : 1.0f;
+        out.jointRatios[i] = speedRatio;
+
+        // "Idler" is the exact case, so it is compared exactly: equal tooth
+        // counts, not merely a ratio close to 1.
+        if (specs[i + 1].teeth == specs[i].teeth) {
+            ++out.stats.idlerCount;
+        } else if (speedRatio > 1.0f) {
+            ++out.stats.speedUpCount;
+        } else {
+            ++out.stats.slowDownCount;
+        }
+    }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Random train generation
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A small deterministic generator, written out rather than taken from <random>.
+//
+// std::mt19937 would do, but its *distributions* are not portable: the standard
+// leaves the algorithm for uniform_int_distribution unspecified, so one seed can
+// produce different trains on libstdc++, libc++ and MSVC.  A train that cannot be
+// reproduced from its seed is a train whose screenshot cannot be explained, and
+// it would make the geometry tests platform-dependent.  This is a 32 bit
+// xorshift: a few lines, identical everywhere.
+class Rng {
+public:
+    explicit Rng(uint32_t seed) : state_(seed != 0u ? seed : 0x9e3779b9u) {}
+
+    uint32_t next() {
+        state_ ^= state_ << 13;
+        state_ ^= state_ >> 17;
+        state_ ^= state_ << 5;
+        return state_;
+    }
+
+    // Uniform in [0, bound); `bound` must be positive.
+    int below(int bound) { return static_cast<int>(next() % static_cast<uint32_t>(bound)); }
+
+    int between(int low, int high) { return low + below(high - low + 1); }
+
+    float unit() { return static_cast<float>(next() & 0xFFFFFFu) / 16777216.0f; }
+
+    float range(float low, float high) { return low + (high - low) * unit(); }
+
+private:
+    uint32_t state_;
+};
+
+float toDegrees(float radians) { return radians * 180.0f / PI; }
+
+// HSV to RGB, h in [0,1) wrapping, s and v in [0,1].  Used for the per-gear
+// tint: hues are spread evenly around the wheel (see below) and this turns each
+// one into a colour the checker texture can be tinted by.
+void hueToRgb(float h, float s, float v, float& r, float& g, float& b) {
+    h -= std::floor(h); // wrap into [0,1)
+    const float sector = h * 6.0f;
+    const int   index  = static_cast<int>(sector) % 6;
+    const float f      = sector - std::floor(sector);
+    const float p      = v * (1.0f - s);
+    const float q      = v * (1.0f - s * f);
+    const float t      = v * (1.0f - s * (1.0f - f));
+    switch (index) {
+        case 0:  r = v; g = t; b = p; break;
+        case 1:  r = q; g = v; b = p; break;
+        case 2:  r = p; g = v; b = t; break;
+        case 3:  r = p; g = q; b = v; break;
+        case 4:  r = t; g = p; b = v; break;
+        default: r = v; g = p; b = q; break;
+    }
+}
+
+// How often a stage is a *step* rather than an idler.  Most stages are idlers,
+// which is what keeps a long train turning at a watchable speed while still
+// looking like a mechanism rather than a row of identical cogs.
+const float kStepChance = 0.30f;
+
+// How far the running speed ratio may wander from 1:1 before the generator
+// steers back.  Without a limit, 15 stages of random stepping can reach 100:1 or
+// 1:100, and neither is something anyone can watch: the late gears are either
+// frozen or strobing.
+const float kRatioCeiling = 3.0f;
+
+} // namespace
+
+bool makeGearTrain(int requestedGears,
+                   uint32_t seed,
+                   float baseSpeed,
+                   std::vector<GearSpec>& specs,
+                   std::vector<float>& jointAngleDeg,
+                   GearTrain& out,
+                   std::string& error) {
+    Rng rng(seed);
+
+    // 0 (or nothing) means "you choose"; anything else is clamped rather than
+    // rejected, so a silly value on a command line still produces a train.
+    int count = 0;
+    if (requestedGears > 0) {
+        count = std::max(kMinTrainGears, std::min(kMaxTrainGears, requestedGears));
+    } else {
+        count = rng.between(kMinTrainGears, kMaxTrainGears);
+    }
+
+    const float module = 1.0f;
+    const float baseThickness = 3.4f;
+
+    // The tooth count most gears share.  Idlers reuse it exactly, and steps are
+    // drawn relative to it, which is what makes the result read as one train
+    // rather than as a bag of unrelated gears.
+    const int baseTeeth = rng.between(18, 34);
+
+    specs.assign(static_cast<size_t>(count), GearSpec());
+    jointAngleDeg.assign(static_cast<size_t>(count - 1), 0.0f);
+
+    // Hues are spread evenly rather than drawn at random: over a dozen gears,
+    // random hues collide, and then two unrelated gears look like one shaft.
+    const float hueOffset = rng.range(0.0f, 1.0f);
+
+    float ratio = 1.0f; // |speed of the latest gear| relative to the first
+
+    // Which stages are steps rather than idlers is decided up front, one draw
+    // per stage, rather than stage by stage inside the tooth loop.  The reason
+    // is the guarantee below: choosing the stages as a set lets the "at least
+    // one step" rule pick the least likely stage anywhere in the train, whereas
+    // deciding in order could only ever append a step onto the end.  That is
+    // the difference between a train that looks generated and one that looks
+    // like a row of idlers with an afterthought bolted to it.
+    std::vector<char> isStep(static_cast<size_t>(count), 0);
+    {
+        int steps = 0;
+        int lowestKeyStage = 1;
+        float lowestKey = 2.0f;
+        for (int i = 1; i < count; ++i) {
+            const float key = rng.unit();
+            if (key < kStepChance) {
+                isStep[static_cast<size_t>(i)] = 1;
+                ++steps;
+            }
+            if (key < lowestKey) {
+                lowestKey = key;
+                lowestKeyStage = i;
+            }
+        }
+        // A train of a dozen gears all the same size is a legitimate gear train
+        // -- that is exactly what an idler is -- but it demonstrates nothing
+        // about ratios, and it is the one outcome that makes the demo look
+        // broken.  So the least likely idler is promoted.
+        if (steps == 0 && count > 1) {
+            isStep[static_cast<size_t>(lowestKeyStage)] = 1;
+        }
+    }
+
+    for (int i = 0; i < count; ++i) {
+        GearSpec& spec = specs[i];
+        spec.module = module;
+        spec.thickness = baseThickness * rng.range(0.85f, 1.15f);
+        spec.color[0] = 0.0f;
+        spec.color[1] = 0.0f;
+        spec.color[2] = 0.0f;
+
+        if (i == 0) {
+            spec.teeth = baseTeeth;
+        } else if (!isStep[static_cast<size_t>(i)]) {
+            // An idler: the same tooth count, so the ratio is exactly 1:1 and
+            // the only thing this stage does is reverse the direction.
+            spec.teeth = specs[i - 1].teeth;
+        } else {
+            // A step stage.  Meshing into a smaller gear makes the next one turn
+            // faster; into a larger one, slower.  Which way to go is free while
+            // the ratio is moderate, and forced when it is not -- otherwise the
+            // train walks away from a speed you can see.
+            const float magnitude = std::fabs(ratio);
+            bool speedUp;
+            if (magnitude > kRatioCeiling) {
+                speedUp = false;               // too fast already: use a larger gear
+            } else if (magnitude < 1.0f / kRatioCeiling) {
+                speedUp = true;                // too slow already: use a smaller gear
+            } else {
+                speedUp = rng.unit() < 0.5f;   // room either way, so choose freely
+            }
+
+            const int   from  = specs[i - 1].teeth;
+            const float factor = rng.range(1.4f, 2.0f);
+            int teeth = speedUp ? static_cast<int>(static_cast<float>(from) / factor)
+                                : static_cast<int>(static_cast<float>(from) * factor);
+            teeth = std::max(kMinGearTeeth, std::min(kMaxGearTeeth, teeth));
+
+            // Clamping can land back on the previous count, which would quietly
+            // turn a step into an idler.  Move off it where there is room; at the
+            // very edge of the range an idler is the honest outcome.
+            if (teeth == from) {
+                if (from + 1 <= kMaxGearTeeth) {
+                    teeth = from + 1;
+                } else if (from - 1 >= kMinGearTeeth) {
+                    teeth = from - 1;
+                }
+            }
+            spec.teeth = teeth;
+        }
+
+        ratio = (i == 0) ? 1.0f
+                         : ratio * static_cast<float>(spec.teeth) /
+                                       static_cast<float>(specs[i - 1].teeth);
+
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+        hueToRgb(hueOffset + static_cast<float>(i) / static_cast<float>(count),
+                 0.55f, 0.95f, r, g, b);
+        spec.color[0] = r;
+        spec.color[1] = g;
+        spec.color[2] = b;
+        spec.label = diag::format("gear %d (%dT)", i, spec.teeth);
+    }
+
+    // --- layout ------------------------------------------------------------
+    //
+    // The train is walked outwards, choosing each joint direction so that the
+    // result folds up rather than running away in a line.
+    //
+    // The search is over a ring of candidate directions.  A candidate is only
+    // usable if the new gear clears every gear it does not mesh with --
+    // neighbours are touching by design, everything else must not be -- and
+    // among the usable ones the winner is the one that lands closest to where
+    // the train already is.  Maximising clearance instead would be the obvious
+    // rule and the wrong one: the direction pointing away from the whole train
+    // always clears everything, so the train would stretch into a straight line
+    // and the framing would shrink the gears to make room for it.
+    const int   kDirectionCandidates = 72;   // 5 degree steps
+    const float kMinClearance = 0.15f;       // world units, so tips do not touch
+
+    std::vector<float> px(static_cast<size_t>(count), 0.0f);
+    std::vector<float> py(static_cast<size_t>(count), 0.0f);
+    std::vector<float> pitch(static_cast<size_t>(count), 0.0f);
+    std::vector<float> tip(static_cast<size_t>(count), 0.0f);
+    for (int i = 0; i < count; ++i) {
+        // The same radii buildGearMesh will arrive at, computed here because the
+        // layout needs them before any mesh exists.
+        pitch[i] = 0.5f * module * static_cast<float>(specs[i].teeth);
+        tip[i]   = pitch[i] + 0.85f * module;
+    }
+
+    float heading = rng.range(0.0f, TWO_PI);
+    int crowdedJoints = 0;
+
+    for (int i = 1; i < count; ++i) {
+        const float distance = pitch[i - 1] + pitch[i];
+
+        // Where the train is so far, so a new gear can be pulled toward it.
+        float centreX = 0.0f;
+        float centreY = 0.0f;
+        for (int j = 0; j < i; ++j) {
+            centreX += px[j];
+            centreY += py[j];
+        }
+        centreX /= static_cast<float>(i);
+        centreY /= static_cast<float>(i);
+
+        float bestScore = -1e30f;
+        float bestAngle = heading;
+        bool haveUsable = false;
+        float fallbackAngle = heading;
+        float fallbackClearance = -1e30f;
+
+        for (int c = 0; c < kDirectionCandidates; ++c) {
+            const float angle = heading + TWO_PI * static_cast<float>(c) /
+                                                    static_cast<float>(kDirectionCandidates);
+            const float nx = px[i - 1] + distance * std::cos(angle);
+            const float ny = py[i - 1] + distance * std::sin(angle);
+
+            // Clearance from every gear this one does not mesh with.  Gear i-1
+            // is the mesh partner and is expected to touch.
+            float clearance = 1e30f;
+            for (int j = 0; j < i - 1; ++j) {
+                const float dx = nx - px[j];
+                const float dy = ny - py[j];
+                const float gap = std::sqrt(dx * dx + dy * dy) - (tip[i] + tip[j]);
+                if (gap < clearance) { clearance = gap; }
+            }
+
+            // Track the most roomy candidate as a fallback for the case where
+            // the train has closed in on itself and nothing is strictly free.
+            // Squeezing a gear into the least-bad spot beats refusing to place
+            // it, and the tests assert that in practice this never happens.
+            if (clearance > fallbackClearance) {
+                fallbackClearance = clearance;
+                fallbackAngle = angle;
+            }
+
+            if (i > 1 && clearance < kMinClearance) { continue; }
+
+            // Compact: stay near the middle of what has been placed already.
+            const float dx = nx - centreX;
+            const float dy = ny - centreY;
+            const float spread = std::sqrt(dx * dx + dy * dy);
+            // A slight preference for carrying on the way we were going, so the
+            // train curves instead of turning back on itself at every joint.
+            const float straightness = std::cos(angle - heading);
+            const float score = -spread + 0.25f * straightness;
+
+            if (!haveUsable || score > bestScore) {
+                bestScore = score;
+                bestAngle = angle;
+                haveUsable = true;
+            }
+        }
+
+        if (!haveUsable) {
+            bestAngle = fallbackAngle;
+            ++crowdedJoints;
+        }
+
+        jointAngleDeg[i - 1] = toDegrees(bestAngle);
+        px[i] = px[i - 1] + distance * std::cos(bestAngle);
+        py[i] = py[i - 1] + distance * std::sin(bestAngle);
+        heading = bestAngle;
+    }
+
+    // The directions are settled, so the real thing can be built on top of them.
+    if (!buildGearTrain(&specs[0], count, &jointAngleDeg[0], baseSpeed, out, error)) {
+        return false;
+    }
+    out.stats.crowdedJoints = crowdedJoints;
+    return true;
+}
+
+std::string toothProfile(const GearSpec* specs, int count) {
+    std::string text;
+    for (int i = 0; i < count; ++i) {
+        if (i != 0) { text += "-"; }
+        text += diag::format("%d", specs[i].teeth);
+    }
+    return text;
 }
 
 // ---------------------------------------------------------------------------
